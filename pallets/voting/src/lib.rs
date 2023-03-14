@@ -187,8 +187,8 @@ pub mod pallet {
 			ProposalCreators::<T>::insert(&who, ());
 			Proposals::<T>::insert(proposal_hash, 0u128);
 
-			//increment counter
-			Self::increase_total();
+			//increment total amount of proposals counter
+			Self::total_proposals();
 
 			//emit event
 			Self::deposit_event(Event::ProposalSubmitted { proposal: proposal_hash, who });
@@ -199,7 +199,11 @@ pub mod pallet {
 		#[pallet::call_index(2)]
 		#[pallet::weight(0)]
 		// Extrinsic to submit a vote
-		pub fn submit_vote(origin: OriginFor<T>, vote: Votes<Conviction>) -> DispatchResult {
+		pub fn submit_vote(
+			origin: OriginFor<T>,
+			vote: Votes<Conviction>,
+			proposal_id: ProposalID<T>,
+		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
 			// check if in voting phase
@@ -207,9 +211,24 @@ pub mod pallet {
 			//check if person is registered to vote
 			ensure!(Self::is_registered(&who), Error::<T>::NotRegisteredError);
 			//check if the person has already voted
-			ensure!(!Self::has_voted(&who), Error::<T>::VoteForSameProposalError);
+			ensure!(!Self::has_voted(&who, &proposal_id), Error::<T>::VoteForSameProposalError);
+			// check if the proposal exists
+			ensure!(
+				Self::proposal_exists(&proposal_id),
+				Error::<T>::VoteForNonExistentProposalError
+			);
 
-			
+			Proposals::<T>::mutate(proposal_id, |maybe_value| {
+				if let Some(value) = maybe_value {
+					if vote.vote {
+						let plus = value.saturating_add(1);
+						*value = plus;
+					} else {
+						let minus = value.saturating_sub(1);
+						*value = minus;
+					}
+				}
+			});
 
 			Ok(())
 		}
@@ -238,10 +257,10 @@ pub mod pallet {
 		pub fn get_total() -> u32 {
 			TotalProposals::<T>::get() //make into 0 on None
 		}
-		pub fn increase_total() {
-			//we dont need to check for overflow bc our maxProposal is below u32::max
-			TotalProposals::<T>::mutate(|x| *x += 1);
-		}
+		// pub fn increase_total() {
+		// 	//we dont need to check for overflow bc our maxProposal is below u32::max
+		// 	TotalProposals::<T>::mutate(|x| *x += 1);
+		// }
 
 		pub fn is_proposal_phase() -> bool {
 			matches!(InPhase::<T>::get(), types::Phase::ProposalPhase)
@@ -267,12 +286,17 @@ pub mod pallet {
 			Ok(vote)
 		}
 
-		pub fn has_voted(who: &T::AccountId) -> bool {
-			!RegisteredVotersWithVotes::<T>::get(who)
-				.expect(
-					"Already tested if voter is registered and in map before calling this function",
-				)
-				.is_empty()
+		pub fn has_voted(who: &T::AccountId, proposal_id: &ProposalID<T>) -> bool {
+			let mut res = false;
+
+			let b_vec = RegisteredVotersWithVotes::<T>::get(who).expect("error, voter not found");
+
+			for i in b_vec {
+				if i.proposal.encode().as_slice() == proposal_id.encode().as_slice() {
+					res = true;
+				}
+			}
+			res
 		}
 
 		pub fn has_enough_funds(who: &T::AccountId, total_tokens: &BalanceOf<T>) -> DispatchResult {
