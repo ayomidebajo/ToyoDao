@@ -1,6 +1,8 @@
 use codec::{Decode, Encode};
-use frame_support::pallet_prelude::MaxEncodedLen;
+use frame_support::{pallet_prelude::MaxEncodedLen, traits::Get, BoundedVec};
+// use frame_support::BoundedVec;
 use scale_info::TypeInfo;
+// use sp_core::Get;
 
 /// contains the tokens staked/allocated for each vote and the proposal hash
 #[derive(Encode, Decode, TypeInfo, Default, Debug, MaxEncodedLen, Clone, PartialEq)]
@@ -9,6 +11,16 @@ pub struct VoteAllocated<Currency, Hash, Conviction> {
 	pub allocation: Currency,
 	pub proposal: Hash,
 	pub vote: Votes<Conviction>,
+}
+
+#[derive(Encode, Decode, TypeInfo, MaxEncodedLen, Debug, Eq, PartialEq, Clone, Default)]
+#[scale_info(skip_type_params(M))]
+pub struct Proposal<AccountId, M: Get<u32>> {
+	pub title: BoundedVec<u32, M>,
+	pub author: AccountId,
+	pub about: BoundedVec<u32, M>,
+	pub department: BoundedVec<u32, M>,
+	// expiry: BlockNumber,
 }
 
 #[derive(Encode, Decode, TypeInfo, MaxEncodedLen, Debug, Eq, PartialEq, Clone, Default)]
@@ -50,4 +62,7 @@ pub enum Conviction {
 pub enum Phase {
 	ProposalPhase,
 	VotingPhase,
+	Expired,
+	Accepted,
+	Aborted,
 }

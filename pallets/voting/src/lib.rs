@@ -17,10 +17,13 @@ mod benchmarking;
 
 #[frame_support::pallet]
 pub mod pallet {
+	use crate::types::{Conviction, Votes};
+
 	use super::*;
 	use frame_support::{
 		pallet_prelude::*,
-		traits::{Currency, LockableCurrency, ReservableCurrency},
+		sp_runtime::traits::{CheckedAdd, Hash, IntegerSquareRoot},
+		traits::{Currency, LockIdentifier, LockableCurrency, ReservableCurrency, WithdrawReasons},
 	};
 	use frame_system::pallet_prelude::*;
 
@@ -44,6 +47,10 @@ pub mod pallet {
 	#[pallet::generate_store(pub(super) trait Store)]
 	pub struct Pallet<T>(_);
 
+	const PROPOSAL_PHASE_LENGTH: u32 = 1000;
+
+	const LOCK_ID: LockIdentifier = *b"example "; //
+
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
@@ -54,6 +61,9 @@ pub mod pallet {
 		type Currency: Currency<Self::AccountId>
 			+ ReservableCurrency<Self::AccountId>
 			+ LockableCurrency<Self::AccountId>;
+
+		#[pallet::constant]
+		type MaxLength: Get<u32>;
 	}
 
 	#[pallet::type_value]
@@ -61,10 +71,10 @@ pub mod pallet {
 		types::Phase::ProposalPhase
 	}
 
-	#[pallet::type_value]
-	pub fn CounterStart<T: Config>() -> u32 {
-		0u32
-	}
+	// #[pallet::type_value]
+	// pub fn CounterStart<T: Config>() -> u32 {
+	// 	0u32
+	// }
 
 	#[pallet::storage]
 	#[pallet::getter(fn registered_voters_with_votes)]
@@ -79,7 +89,8 @@ pub mod pallet {
 	pub type InPhase<T: Config> = StorageValue<_, types::Phase, ValueQuery, PhaseStart<T>>;
 
 	#[pallet::storage] //initialize counter with 0
-	pub type TotalProposals<T: Config> = StorageValue<_, u32, ValueQuery, CounterStart<T>>;
+	#[pallet::getter(fn total_proposals)]
+	pub type TotalProposals<T: Config> = StorageValue<_, u32, ValueQuery, GetDefault>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn proposal_creators)]
@@ -99,6 +110,9 @@ pub mod pallet {
 			proposal: T::Hash,
 			who: T::AccountId,
 		},
+		VoteSubmitted {
+			who: T::AccountId,
+		},
 	}
 
 	// Errors inform users that something went wrong.
@@ -114,6 +128,13 @@ pub mod pallet {
 		ProposalLimitReachedError,
 		ProposalDuplicateError,
 		ProposalSubmitted,
+		VoteForSameProposalError,
+		// Other errors
+		OverflowError,
+		ConversionError,
+		VoteForNonExistentProposalError,
+		VoteAllocationZeroError,
+		VoteWithInsufficientFundsError,
 	}
 
 	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
@@ -121,21 +142,25 @@ pub mod pallet {
 	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// An example dispatchable that takes a singles value as a parameter, writes the value to
-		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
 		#[pallet::call_index(0)]
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1).ref_time())]
 		pub fn register_voter(origin: OriginFor<T>, who: T::AccountId) -> DispatchResult {
 			ensure_root(origin)?;
-			// T::RegistrationOrigin::ensure_origin(origin)?;
+
 			RegisteredVotersWithVotes::<T>::insert(&who, <VoteInNumbers<T> as Default>::default());
+
 			Self::deposit_event(Event::VoterRegistered { who });
 			Ok(())
 		}
 
 		#[pallet::call_index(1)]
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1).ref_time())]
-		pub fn submit_proposal(origin: OriginFor<T>, text: T::Hash) -> DispatchResult {
+		pub fn submit_proposal(
+			origin: OriginFor<T>,
+			title: BoundedVec<u32, T::MaxLength>,
+			about: BoundedVec<u32, T::MaxLength>,
+			department: BoundedVec<u32, T::MaxLength>,
+		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			// check we are in the proposal Phase
 			ensure!(Self::is_proposal_phase(), Error::<T>::WrongPhaseError);
@@ -144,19 +169,47 @@ pub mod pallet {
 			//check if the user has not already created a proposal
 			ensure!(!Self::created_proposal_already(&who), Error::<T>::ProposalMultipleByOneError);
 
+			// check if proposal created by user is not a duplicate, by checking if the proposal is
+			// running and also if it's been created by that origin (who)
+
 			// check that the limit of total proposals has not been reached
 			ensure!(Self::get_total() < 100, Error::<T>::ProposalLimitReachedError);
+
+			let new_proposal: types::Proposal<T::AccountId, T::MaxLength> =
+				types::Proposal { title, about, author: who.clone(), department };
+
+			let proposal_hash = T::Hashing::hash_of(&new_proposal);
+
 			// check for duplicate proposals
-			ensure!(!Self::proposal_exists(&text), Error::<T>::ProposalDuplicateError);
+			ensure!(!Self::proposal_exists(&proposal_hash), Error::<T>::ProposalDuplicateError);
 
 			//create proposal
 			ProposalCreators::<T>::insert(&who, ());
-			Proposals::<T>::insert(text, 0u128);
+			Proposals::<T>::insert(proposal_hash, 0u128);
+
 			//increment counter
 			Self::increase_total();
 
 			//emit event
-			Self::deposit_event(Event::ProposalSubmitted { proposal: text, who });
+			Self::deposit_event(Event::ProposalSubmitted { proposal: proposal_hash, who });
+
+			Ok(())
+		}
+
+		#[pallet::call_index(2)]
+		#[pallet::weight(0)]
+		// Extrinsic to submit a vote
+		pub fn submit_vote(origin: OriginFor<T>, vote: Votes<Conviction>) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			// check if in voting phase
+			ensure!(!Self::is_proposal_phase(), Error::<T>::WrongPhaseError);
+			//check if person is registered to vote
+			ensure!(Self::is_registered(&who), Error::<T>::NotRegisteredError);
+			//check if the person has already voted
+			ensure!(!Self::has_voted(&who), Error::<T>::VoteForSameProposalError);
+
+			
 
 			Ok(())
 		}
@@ -192,6 +245,40 @@ pub mod pallet {
 
 		pub fn is_proposal_phase() -> bool {
 			matches!(InPhase::<T>::get(), types::Phase::ProposalPhase)
+		}
+
+		pub fn calculate_and_check_votes(
+			id: &ProposalID<T>,
+			vote_weight: &VoteWeight<T>,
+			zero_balance: BalanceOf<T>,
+		) -> Result<types::VoteNumbers<T::Hash>, Error<T>> {
+			// check if proposal id exists
+			ensure!(Self::proposal_exists(id), Error::<T>::VoteForNonExistentProposalError);
+
+			//check if the vote was not zero
+			ensure!(vote_weight > &zero_balance, Error::<T>::VoteAllocationZeroError);
+
+			// get actual number of votes
+			let rt = vote_weight.integer_sqrt(); //square root of voteWeight, rounding down
+			let no_of_votes =
+				TryInto::<u128>::try_into(rt).map_err(|_| Error::<T>::ConversionError)?;
+
+			let vote = types::VoteNumbers { number_of_votes: no_of_votes, proposal: *id };
+			Ok(vote)
+		}
+
+		pub fn has_voted(who: &T::AccountId) -> bool {
+			!RegisteredVotersWithVotes::<T>::get(who)
+				.expect(
+					"Already tested if voter is registered and in map before calling this function",
+				)
+				.is_empty()
+		}
+
+		pub fn has_enough_funds(who: &T::AccountId, total_tokens: &BalanceOf<T>) -> DispatchResult {
+			let bal = &T::Currency::free_balance(&who);
+			ensure!(total_tokens <= bal, Error::<T>::VoteWithInsufficientFundsError);
+			Ok(())
 		}
 	}
 }
