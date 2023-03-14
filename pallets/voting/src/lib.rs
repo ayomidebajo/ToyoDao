@@ -230,6 +230,13 @@ pub mod pallet {
 				}
 			});
 
+			// TODO: calculate the vote weight and write logic based on vote weight, i.e if the weight is large, the origin will likely be posted to that department
+
+			// RegisteredVotersWithVotes::<T>::mutate()
+			//lock funds
+			// T::Currency::set_lock(LOCK_ID, &who, total_tokens, WithdrawReasons::all());
+			Self::deposit_event(Event::VoteSubmitted { who });
+
 			Ok(())
 		}
 	}
