@@ -1,4 +1,10 @@
 [workspace]
-members = ["node", "pallets/template", "pallets/voting", "runtime"]
+members = [
+    "node",
+    "pallets/template",
+    "pallets/voting",
+    "pallets/voting_nft",
+    "runtime",
+]
 [profile.release]
 panic = "unwind"
